@@ -532,7 +532,15 @@ public sealed class BottomSheetDialog : Google.Android.Material.BottomSheet.Bott
         {
             _content?.RemoveFromParent();
 
-            ((BottomSheetDialog)s!).DismissEvent -= @event;
+            try
+            {
+                ((BottomSheetDialog)s!).DismissEvent -= @event;
+            }
+            catch (ObjectDisposedException)
+            {
+                // Android may dispose the native dialog before delivering its dismiss callback.
+                // Removing the native listener then throws, but the dialog is already dismissed.
+            }
 
             _ = taskCompletionSource.TrySetResult();
         };
