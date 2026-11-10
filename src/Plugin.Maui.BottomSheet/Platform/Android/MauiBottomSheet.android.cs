@@ -28,6 +28,7 @@ public sealed class MauiBottomSheet : AndroidView, IReloadHandler
 
     private IBottomSheet? _virtualView;
     private BottomSheetDialog? _bottomSheet;
+    private Task? _closeTask;
 
     private bool _isAttachedToWindow;
     private MauiApplication? _themeApplication;
@@ -191,31 +192,27 @@ public sealed class MauiBottomSheet : AndroidView, IReloadHandler
 
     /// <summary>
     /// Closes the bottom sheet asynchronously, ensuring proper cleanup and notifying the virtual view of closure events.
+    /// A call made while a close is already under way awaits that close instead of starting a second one.
     /// </summary>
     /// <returns>A task representing the asynchronous operation.</returns>
-    public async Task CloseAsync()
+    public Task CloseAsync()
     {
         StopObservingTheme();
+
+        if (_closeTask is { IsCompleted: false })
+        {
+            return _closeTask;
+        }
+
         if (_bottomSheet is null
             || _virtualView is null)
         {
-            return;
+            return Task.CompletedTask;
         }
 
-        _bottomSheet.Canceled -= BottomSheetOnCanceled;
-        _bottomSheet.StateChanged -= BottomSheetOnStateChanged;
-        _bottomSheet.BackPressed -= BottomSheetOnBackPressed;
-        _bottomSheet.LayoutChanged -= BottomSheetOnLayoutChanged;
+        _closeTask = CloseCoreAsync(_bottomSheet, _virtualView);
 
-        _virtualView.OnClosingBottomSheet();
-
-        await _bottomSheet.Dismiss().ConfigureAwait(true);
-
-        SetFrame(true);
-        _virtualView.OnClosedBottomSheet();
-
-        _bottomSheet.Dispose();
-        _bottomSheet = null;
+        return _closeTask;
     }
 
     /// <summary>
@@ -492,6 +489,41 @@ public sealed class MauiBottomSheet : AndroidView, IReloadHandler
     private void RequestedThemeChanged(object? sender, AppThemeChangedEventArgs e)
     {
         Microsoft.Maui.ApplicationModel.MainThread.BeginInvokeOnMainThread(SetBottomSheetBackgroundColor);
+    }
+
+    /// <summary>
+    /// Dismisses <paramref name="bottomSheet"/>, tells <paramref name="virtualView"/> it closed and disposes the dialog.
+    /// </summary>
+    /// <param name="bottomSheet">The dialog to close.</param>
+    /// <param name="virtualView">The bottom sheet the dialog shows.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    private async Task CloseCoreAsync(BottomSheetDialog bottomSheet, IBottomSheet virtualView)
+    {
+        try
+        {
+            bottomSheet.Canceled -= BottomSheetOnCanceled;
+            bottomSheet.StateChanged -= BottomSheetOnStateChanged;
+            bottomSheet.BackPressed -= BottomSheetOnBackPressed;
+            bottomSheet.LayoutChanged -= BottomSheetOnLayoutChanged;
+
+            virtualView.OnClosingBottomSheet();
+
+            await bottomSheet.Dismiss().ConfigureAwait(true);
+
+            SetFrame(true);
+            virtualView.OnClosedBottomSheet();
+
+            bottomSheet.Dispose();
+
+            if (ReferenceEquals(_bottomSheet, bottomSheet))
+            {
+                _bottomSheet = null;
+            }
+        }
+        finally
+        {
+            _closeTask = null;
+        }
     }
 
     /// <summary>

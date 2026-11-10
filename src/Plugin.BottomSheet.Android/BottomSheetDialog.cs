@@ -24,6 +24,7 @@ public sealed class BottomSheetDialog : Google.Android.Material.BottomSheet.Bott
     private readonly int _slideDuration;
 
     private View? _content;
+    private Task? _dismissTask;
 
     private List<BottomSheetState> _bottomSheetStates = [BottomSheetState.Medium, BottomSheetState.Large];
 
@@ -442,6 +443,11 @@ public sealed class BottomSheetDialog : Google.Android.Material.BottomSheet.Bott
     }
 
     /// <summary>
+    /// Gets a value indicating whether the Java peer has been disposed, after which no Java method may be called on this dialog.
+    /// </summary>
+    private bool IsDisposed => Handle == IntPtr.Zero;
+
+    /// <summary>
     /// Reapplies the current Android theme background when no explicit
     /// background color was supplied by the MAUI view.
     /// </summary>
@@ -468,6 +474,7 @@ public sealed class BottomSheetDialog : Google.Android.Material.BottomSheet.Bott
     public override void Show()
     {
         Behavior.PeekHeight = 0;
+        _dismissTask = null;
 
         ShowEvent += BottomSheetDialog_ShowEvent;
 
@@ -515,45 +522,13 @@ public sealed class BottomSheetDialog : Google.Android.Material.BottomSheet.Bott
 
     /// <summary>
     /// Dismisses the currently displayed modal or dialog, removing it from view.
+    /// A second call while the dialog is closing, or after it closed, completes with the first one and does nothing else.
     /// </summary>
     /// <returns>A task that represents the asynchronous operation, containing the result of the dismiss action.</returns>
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "VSTHRD200:Use \"Async\" suffix for async methods", Justification = "Not applicable here. Hide base member.")]
-    public new async Task Dismiss()
+    public new Task Dismiss()
     {
-        _content?.RemoveOnLayoutChangeListener(_layoutChangeListener);
-
-        _onBackPressedCallback.BackPressed -= OnBackPressedCallbackOnBackPressed;
-        _onBackPressedCallback.Remove();
-
-        TaskCompletionSource taskCompletionSource = new();
-
-        EventHandler @event = null!;
-        @event = (s, e) =>
-        {
-            _content?.RemoveFromParent();
-
-            try
-            {
-                ((BottomSheetDialog)s!).DismissEvent -= @event;
-            }
-            catch (ObjectDisposedException)
-            {
-                // Android may dispose the native dialog before delivering its dismiss callback.
-                // Removing the native listener then throws, but the dialog is already dismissed.
-            }
-
-            _ = taskCompletionSource.TrySetResult();
-        };
-        DismissEvent += @event;
-
-        // Googles BottomSheetDialog has a slide down/ fade out animation.
-        // This means the dialog itself is sliding up from the bottom. Changing the background may look weird as described in #184.
-        // Sooo wait until the slide down is almost finished and change the background.
-        await _backgroundColorDrawable.AnimateChangeAsync(_backgroundColorDrawable.Color.ToArgb(), Color.Transparent.ToArgb(), _slideDuration - SlideInOutFadeInOutDelay).ConfigureAwait(true);
-
-        base.Dismiss();
-
-        await taskCompletionSource.Task.ConfigureAwait(true);
+        return _dismissTask ??= DismissCoreAsync();
     }
 
     /// <summary>
@@ -615,6 +590,76 @@ public sealed class BottomSheetDialog : Google.Android.Material.BottomSheet.Bott
         _bottomSheetCallback.Dispose();
         _touchOutsideListener.Dispose();
         _backgroundColorDrawable.Dispose();
+    }
+
+    /// <summary>
+    /// Fades the window background, dismisses the native dialog and waits for the native dismiss callback.
+    /// </summary>
+    /// <returns>A task that completes once the dialog is dismissed, or at once when there is nothing left to dismiss.</returns>
+    private async Task DismissCoreAsync()
+    {
+        if (IsDisposed)
+        {
+            return;
+        }
+
+        _content?.RemoveOnLayoutChangeListener(_layoutChangeListener);
+
+        _onBackPressedCallback.BackPressed -= OnBackPressedCallbackOnBackPressed;
+        _onBackPressedCallback.Remove();
+
+        TaskCompletionSource taskCompletionSource = new();
+
+        EventHandler @event = null!;
+        @event = (s, e) =>
+        {
+            _content?.RemoveFromParent();
+
+            // This runs inside the Java dismiss callback: an exception here ends the app, so never touch a disposed peer.
+            RemoveDismissHandler(@event);
+
+            _ = taskCompletionSource.TrySetResult();
+        };
+        DismissEvent += @event;
+
+        // Googles BottomSheetDialog has a slide down/ fade out animation.
+        // This means the dialog itself is sliding up from the bottom. Changing the background may look weird as described in #184.
+        // Sooo wait until the slide down is almost finished and change the background.
+        await _backgroundColorDrawable.AnimateChangeAsync(_backgroundColorDrawable.Color.ToArgb(), Color.Transparent.ToArgb(), _slideDuration - SlideInOutFadeInOutDelay).ConfigureAwait(true);
+
+        if (IsDisposed
+            || IsShowing == false)
+        {
+            // Disposed, never shown or already dismissed while the background faded: Android sends no dismiss callback for it.
+            RemoveDismissHandler(@event);
+            return;
+        }
+
+        base.Dismiss();
+
+        await taskCompletionSource.Task.ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Unsubscribes a dismiss handler without calling into a disposed Java peer.
+    /// </summary>
+    /// <param name="handler">The handler to remove.</param>
+    private void RemoveDismissHandler(EventHandler handler)
+    {
+        if (IsDisposed)
+        {
+            return;
+        }
+
+        try
+        {
+            DismissEvent -= handler;
+        }
+        catch (ObjectDisposedException)
+        {
+            // Android may dispose the native dialog before delivering its dismiss callback.
+            // Removing the native listener then throws, but the dialog is already dismissed.
+        }
     }
 
     /// <summary>
